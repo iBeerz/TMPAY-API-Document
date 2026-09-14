@@ -112,7 +112,7 @@ function tmn_refill ($truemoney_password)
     else
     {
         /* กรณีไม่มี cURL ให้ใช้ file_get_contents แทน */
-        $curl_content = file_get_contents('http://www.tmpay.net/TPG/backend.php?merchant_id=TMPAY&password=' . $truemoney_password . '&resp_url=http://www.mywebsite.com/tmpay_result.php');
+        $curl_content = file_get_contents('https://www.tmpay.net/TPG/backend.php?merchant_id=TMPAY&password=' . $truemoney_password . '&resp_url=http://www.mywebsite.com/tmpay_result.php');
     }
 
     /* ตรวจสอบว่า TMPAY รับรายการแล้ว (SUCCEED => ส่งไปแล้ว รอผลจริงภายหลัง) */
