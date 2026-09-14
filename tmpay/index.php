@@ -1,10 +1,17 @@
 <?php
+
 declare(strict_types=1);
+
+/**
+ * ฝั่งรับรหัสบัตรจากลูกค้า
+ * ตรวจรูปแบบ → บันทึก pending → ส่ง GET ไป TMPAY → รอ callback มาอัปเดตผลจริง
+ */
 
 session_start();
 
 $config = require __DIR__ . '/config.php';
 
+// เชื่อม MySQL ตามค่าใน config.php (ใช้ connection เดิมถ้าเรียกซ้ำ)
 function db(array $config): PDO
 {
     static $pdo = null;
@@ -26,6 +33,7 @@ function db(array $config): PDO
     return $pdo;
 }
 
+// เดโมใช้ user คนแรกในตาราง — โปรเจกต์จริงให้ผูกกับระบบล็อกอิน
 function current_user(PDO $pdo): array
 {
     $stmt = $pdo->query('SELECT id, username, credit FROM users ORDER BY id ASC LIMIT 1');
@@ -43,13 +51,14 @@ function flash(): ?array
     return $msg;
 }
 
+// ส่งรหัสบัตรไป TMPAY แบบ GET ตามเอกสาร — คำตอบตอนนี้คือรับรายการแล้ว ไม่ใช่ผลเติมเงินจริง
 function send_tmpay(array $tmpay, string $password, string $channel): string
 {
     $url = $tmpay['backend_url'] . '?' . http_build_query([
         'merchant_id' => $tmpay['merchant_id'],
-        'password' => $password,
-        'resp_url' => $tmpay['resp_url'],
-        'channel' => $channel,
+        'password' => $password,          // รหัสบัตร 14 หลัก
+        'resp_url' => $tmpay['resp_url'], // ให้ TMPAY ยิงผลกลับที่ callback.php
+        'channel' => $channel,            // truemoney หรือ razer_gold_pin
     ]);
 
     if (function_exists('curl_init')) {
@@ -87,7 +96,7 @@ $channels = $config['tmpay']['channels'];
 $channel = (string) ($_POST['channel'] ?? $config['tmpay']['default_channel']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $password = preg_replace('/\D+/', '', (string) ($_POST['password'] ?? ''));
+    $password = preg_replace('/\D+/', '', (string) ($_POST['password'] ?? '')); // เหลือแต่ตัวเลข
 
     if (!isset($channels[$channel])) {
         $error = 'กรุณาเลือกช่องทางชำระเงิน TrueMoney หรือ Razer Gold PIN';
@@ -101,10 +110,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             if ($row && in_array($row['status'], ['success', 'awaiting_result', 'pending'], true)) {
                 $error = 'รหัสบัตรนี้ถูกส่งเข้าระบบแล้ว';
             } else {
+                // รายการเก่าที่ failed แล้ว ลบทิ้งเพื่อส่งรหัสเดิมใหม่ได้
                 if ($row) {
                     $pdo->prepare('DELETE FROM tmpay_transactions WHERE id = ?')->execute([$row['id']]);
                 }
 
+                // บันทึกคิวก่อนยิง API — ยังไม่รู้มูลค่าบัตร จนกว่า callback จะมา
                 $insert = $pdo->prepare(
                     'INSERT INTO tmpay_transactions (user_id, password, channel, status)
                      VALUES (?, ?, ?, ?)'
@@ -112,11 +123,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $insert->execute([$user['id'], $password, $channel, 'pending']);
 
                 $response = send_tmpay($config['tmpay'], $password, $channel);
+                // รูปแบบตอบกลับ เช่น SUCCEED|XYZ1234567 หรือ ERROR|INVALID_PASSWORD
                 $parts = explode('|', $response, 2);
                 $code = strtoupper(trim($parts[0] ?? ''));
                 $detail = trim($parts[1] ?? '');
 
                 if ($code === 'SUCCEED') {
+                    // TMPAY รับงานแล้ว — เก็บ transaction_id แล้วรอผลจริงที่ callback.php
                     $pdo->prepare(
                         "UPDATE tmpay_transactions
                          SET transaction_id = ?, status = 'awaiting_result', message = ?
@@ -162,6 +175,7 @@ $statusLabel = [
 ?>
 <!DOCTYPE html>
 <html lang="th">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -177,7 +191,11 @@ $statusLabel = [
             --danger: #ff6b7a;
             --warn: #f5c542;
         }
-        * { box-sizing: border-box; }
+
+        * {
+            box-sizing: border-box;
+        }
+
         body {
             margin: 0;
             font-family: "Segoe UI", "Sarabun", sans-serif;
@@ -185,7 +203,13 @@ $statusLabel = [
             color: var(--text);
             min-height: 100vh;
         }
-        .wrap { max-width: 720px; margin: 40px auto; padding: 0 16px; }
+
+        .wrap {
+            max-width: 720px;
+            margin: 40px auto;
+            padding: 0 16px;
+        }
+
         .card {
             background: var(--card);
             border: 1px solid var(--line);
@@ -193,12 +217,41 @@ $statusLabel = [
             padding: 24px;
             margin-bottom: 16px;
         }
-        h1 { margin: 0 0 8px; font-size: 1.4rem; }
-        p { color: var(--muted); }
-        .row { display: flex; justify-content: space-between; gap: 12px; }
-        label { display: block; margin-bottom: 8px; color: var(--muted); }
-        .channels { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
-        .channels input { position: absolute; opacity: 0; pointer-events: none; }
+
+        h1 {
+            margin: 0 0 8px;
+            font-size: 1.4rem;
+        }
+
+        p {
+            color: var(--muted);
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--muted);
+        }
+
+        .channels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .channels input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+
         .channels span {
             display: block;
             padding: 14px 12px;
@@ -209,11 +262,13 @@ $statusLabel = [
             cursor: pointer;
             font-weight: 600;
         }
-        .channels input:checked + span {
+
+        .channels input:checked+span {
             border-color: var(--accent);
             box-shadow: 0 0 0 1px var(--accent) inset;
             color: var(--accent);
         }
+
         input[type="text"] {
             width: 100%;
             padding: 14px 16px;
@@ -224,6 +279,7 @@ $statusLabel = [
             font-size: 1.1rem;
             letter-spacing: 0.12em;
         }
+
         button {
             margin-top: 14px;
             width: 100%;
@@ -235,95 +291,147 @@ $statusLabel = [
             font-weight: 700;
             cursor: pointer;
         }
-        .alert { padding: 12px 14px; border-radius: 10px; margin-bottom: 14px; }
-        .ok { background: #163526; color: var(--accent); }
-        .err { background: #3a1a22; color: var(--danger); }
-        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-        th, td { text-align: left; padding: 10px 6px; border-bottom: 1px solid var(--line); }
-        th { color: var(--muted); font-weight: 600; }
-        .pill { padding: 2px 8px; border-radius: 999px; font-size: 0.75rem; }
-        .success { background: #163526; color: var(--accent); }
-        .awaiting_result, .pending { background: #3a3214; color: var(--warn); }
-        .failed { background: #3a1a22; color: var(--danger); }
-        code { color: #9ad4ff; }
+
+        .alert {
+            padding: 12px 14px;
+            border-radius: 10px;
+            margin-bottom: 14px;
+        }
+
+        .ok {
+            background: #163526;
+            color: var(--accent);
+        }
+
+        .err {
+            background: #3a1a22;
+            color: var(--danger);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+
+        th,
+        td {
+            text-align: left;
+            padding: 10px 6px;
+            border-bottom: 1px solid var(--line);
+        }
+
+        th {
+            color: var(--muted);
+            font-weight: 600;
+        }
+
+        .pill {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.75rem;
+        }
+
+        .success {
+            background: #163526;
+            color: var(--accent);
+        }
+
+        .awaiting_result,
+        .pending {
+            background: #3a3214;
+            color: var(--warn);
+        }
+
+        .failed {
+            background: #3a1a22;
+            color: var(--danger);
+        }
+
+        code {
+            color: #9ad4ff;
+        }
     </style>
 </head>
+
 <body>
-<div class="wrap">
-    <div class="card">
-        <div class="row">
-            <div>
-                <h1>เติมเงิน TMPAY</h1>
-                <p>ผู้ใช้ <strong><?= htmlspecialchars($user['username'], ENT_QUOTES, 'UTF-8') ?></strong></p>
+    <div class="wrap">
+        <div class="card">
+            <div class="row">
+                <div>
+                    <h1>เติมเงิน TMPAY</h1>
+                    <p>ผู้ใช้ <strong><?= htmlspecialchars($user['username'], ENT_QUOTES, 'UTF-8') ?></strong></p>
+                </div>
+                <div>
+                    <p>เครดิตคงเหลือ</p>
+                    <h1><?= number_format((float) $user['credit'], 2) ?> บาท</h1>
+                </div>
             </div>
-            <div>
-                <p>เครดิตคงเหลือ</p>
-                <h1><?= number_format((float) $user['credit'], 2) ?> บาท</h1>
-            </div>
+
+            <?php if ($flash): ?>
+                <div class="alert <?= $flash['type'] === 'ok' ? 'ok' : 'err' ?>">
+                    <?= htmlspecialchars($flash['text'], ENT_QUOTES, 'UTF-8') ?>
+                </div>
+            <?php endif; ?>
+            <?php if ($error): ?>
+                <div class="alert err"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
+            <?php endif; ?>
+
+            <form method="post" action="index.php" autocomplete="off">
+                <!-- channel ที่เลือกจะถูกส่งไป TMPAY พร้อมรหัสบัตร -->
+                <label>ช่องทางชำระเงิน</label>
+                <div class="channels">
+                    <?php foreach ($channels as $value => $label): ?>
+                        <label>
+                            <input type="radio" name="channel" value="<?= htmlspecialchars($value, ENT_QUOTES, 'UTF-8') ?>" <?= $channel === $value ? 'checked' : '' ?> required>
+                            <span><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></span>
+                        </label>
+                    <?php endforeach; ?>
+                </div>
+                <label for="password">รหัสบัตร 14 หลัก</label>
+                <input id="password" name="password" type="text" maxlength="14" pattern="\d{14}" required placeholder="55555555555551" value="<?= htmlspecialchars((string) ($_POST['password'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
+                <button type="submit">ส่งรายการไป TMPAY</button>
+            </form>
+            <p>ทดสอบด้วย <code>merchant_id=TEST</code> เช่น <code>55555555555551</code> = 50 บาท</p>
+            <p>callback: <code><?= htmlspecialchars($config['tmpay']['resp_url'], ENT_QUOTES, 'UTF-8') ?></code></p>
         </div>
 
-        <?php if ($flash): ?>
-            <div class="alert <?= $flash['type'] === 'ok' ? 'ok' : 'err' ?>">
-                <?= htmlspecialchars($flash['text'], ENT_QUOTES, 'UTF-8') ?>
-            </div>
-        <?php endif; ?>
-        <?php if ($error): ?>
-            <div class="alert err"><?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?></div>
-        <?php endif; ?>
-
-        <form method="post" action="index.php" autocomplete="off">
-            <label>ช่องทางชำระเงิน</label>
-            <div class="channels">
-                <?php foreach ($channels as $value => $label): ?>
-                    <label>
-                        <input type="radio" name="channel" value="<?= htmlspecialchars($value, ENT_QUOTES, 'UTF-8') ?>" <?= $channel === $value ? 'checked' : '' ?> required>
-                        <span><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></span>
-                    </label>
-                <?php endforeach; ?>
-            </div>
-            <label for="password">รหัสบัตร 14 หลัก</label>
-            <input id="password" name="password" type="text" maxlength="14" pattern="\d{14}" required placeholder="55555555555551" value="<?= htmlspecialchars((string) ($_POST['password'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
-            <button type="submit">ส่งรายการไป TMPAY</button>
-        </form>
-        <p>ทดสอบด้วย <code>merchant_id=TEST</code> เช่น <code>55555555555551</code> = 50 บาท</p>
-        <p>callback: <code><?= htmlspecialchars($config['tmpay']['resp_url'], ENT_QUOTES, 'UTF-8') ?></code></p>
+        <div class="card">
+            <h1>ประวัติรายการ</h1>
+            <?php if (!$txns): ?>
+                <p>ยังไม่มีรายการ</p>
+            <?php else: ?>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>เวลา</th>
+                            <th>ช่องทาง</th>
+                            <th>รหัสบัตร</th>
+                            <th>Txn</th>
+                            <th>จำนวน</th>
+                            <th>สถานะ</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <?php foreach ($txns as $txn): ?>
+                            <tr>
+                                <td><?= htmlspecialchars($txn['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars($channels[$txn['channel']] ?? $txn['channel'], ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars($txn['password'], ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= htmlspecialchars((string) $txn['transaction_id'], ENT_QUOTES, 'UTF-8') ?></td>
+                                <td><?= $txn['real_amount'] !== null ? number_format((float) $txn['real_amount'], 2) : '-' ?></td>
+                                <td>
+                                    <span class="pill <?= htmlspecialchars($txn['status'], ENT_QUOTES, 'UTF-8') ?>">
+                                        <?= htmlspecialchars($statusLabel[$txn['status']] ?? $txn['status'], ENT_QUOTES, 'UTF-8') ?>
+                                    </span>
+                                </td>
+                            </tr>
+                        <?php endforeach; ?>
+                    </tbody>
+                </table>
+            <?php endif; ?>
+        </div>
     </div>
-
-    <div class="card">
-        <h1>ประวัติรายการ</h1>
-        <?php if (!$txns): ?>
-            <p>ยังไม่มีรายการ</p>
-        <?php else: ?>
-            <table>
-                <thead>
-                <tr>
-                    <th>เวลา</th>
-                    <th>ช่องทาง</th>
-                    <th>รหัสบัตร</th>
-                    <th>Txn</th>
-                    <th>จำนวน</th>
-                    <th>สถานะ</th>
-                </tr>
-                </thead>
-                <tbody>
-                <?php foreach ($txns as $txn): ?>
-                    <tr>
-                        <td><?= htmlspecialchars($txn['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars($channels[$txn['channel']] ?? $txn['channel'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars($txn['password'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= htmlspecialchars((string) $txn['transaction_id'], ENT_QUOTES, 'UTF-8') ?></td>
-                        <td><?= $txn['real_amount'] !== null ? number_format((float) $txn['real_amount'], 2) : '-' ?></td>
-                        <td>
-                            <span class="pill <?= htmlspecialchars($txn['status'], ENT_QUOTES, 'UTF-8') ?>">
-                                <?= htmlspecialchars($statusLabel[$txn['status']] ?? $txn['status'], ENT_QUOTES, 'UTF-8') ?>
-                            </span>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
-        <?php endif; ?>
-    </div>
-</div>
 </body>
+
 </html>

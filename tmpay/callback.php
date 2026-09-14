@@ -1,16 +1,18 @@
 <?php
+
 declare(strict_types=1);
 
 /**
- * TMPAY เรียก resp_url แบบ GET:
- * transaction_id, password, real_amount, status
- * ต้องตอบกลับข้อความที่มี SUCCEED หรือ ERROR
+ * ฝั่งรับผลการทำรายการจาก TMPAY (resp_url)
+ * TMPAY เรียกไฟล์นี้แบบ GET: transaction_id, password, real_amount, status
+ * ต้อง echo ข้อความที่มีคำว่า SUCCEED หรือ ERROR เพื่อให้ TMPAY รู้ว่าปลายทางได้รับแล้ว
  */
 
 header('Content-Type: text/plain; charset=UTF-8');
 
 $config = require __DIR__ . '/config.php';
 
+// ตอบกลับตามสเปก TMPAY — อย่าส่ง HTML
 function fail(string $reason): never
 {
     echo 'ERROR|' . $reason;
@@ -40,15 +42,17 @@ try {
     fail('DATABASE_UNAVAILABLE');
 }
 
+// ค่าที่ TMPAY ส่งกลับมาหลังตรวจบัตรกับทรูมันนี่เสร็จ (ใช้เวลาประมาณ 1–5 นาที)
 $transactionId = preg_replace('/[^A-Za-z0-9]/', '', (string) ($_GET['transaction_id'] ?? ''));
 $password = preg_replace('/\D+/', '', (string) ($_GET['password'] ?? ''));
 $realAmount = (float) ($_GET['real_amount'] ?? 0);
-$status = (int) ($_GET['status'] ?? 0);
+$status = (int) ($_GET['status'] ?? 0); // 1 สำเร็จ, 3 ใช้แล้ว, 4 รหัสผิด, 5 เป็นบัตรทรูมูฟ
 
 if (strlen($transactionId) !== 10 || strlen($password) !== 14) {
     fail('INVALID_PAYLOAD');
 }
 
+// ล็อกแถวรายการไว้กัน callback ยิงซ้ำแล้วเติมเครดิตสองรอบ
 $find = $pdo->prepare(
     'SELECT id, user_id, status, transaction_id
      FROM tmpay_transactions
@@ -65,7 +69,7 @@ try {
 
     if (!$txn) {
         $pdo->rollBack();
-        fail('CARD_DOESNT_EXIST');
+        fail('CARD_DOESNT_EXIST'); // ไม่มีรายการที่ร้านค้าส่งไปก่อนหน้านี้
     }
 
     if ($txn['transaction_id'] && $txn['transaction_id'] !== $transactionId) {
@@ -73,11 +77,13 @@ try {
         fail('TRANSACTION_MISMATCH');
     }
 
+    // เคยเติมสำเร็จแล้ว — ตอบ SUCCEED แต่ไม่บวกเครดิตซ้ำ
     if ($txn['status'] === 'success') {
         $pdo->commit();
         ok('ALREADY_TOPPED_UP');
     }
 
+    // map สถานะจาก TMPAY ไปสถานะในร้านค้า
     $tmpayMap = [
         1 => 'success',
         3 => 'failed',
@@ -101,6 +107,7 @@ try {
         $txn['id'],
     ]);
 
+    // status = 1 เท่านั้นที่ถือว่าเติมเงินสำเร็จ แล้วค่อยบวกเครดิตผู้ใช้
     if ($status === 1) {
         if ($realAmount <= 0) {
             $pdo->rollBack();
@@ -113,7 +120,7 @@ try {
     }
 
     $pdo->commit();
-    fail('CARD_DOESNT_EXIST');
+    fail('CARD_DOESNT_EXIST'); // บัตรไม่ผ่าน (ใช้แล้ว / รหัสผิด / ทรูมูฟ)
 } catch (Throwable $e) {
     if ($pdo->inTransaction()) {
         $pdo->rollBack();
