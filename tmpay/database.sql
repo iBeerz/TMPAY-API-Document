@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS `tmpay_transactions` (
   `user_id` INT UNSIGNED NOT NULL,
   `password` CHAR(14) NOT NULL COMMENT 'รหัสบัตร 14 หลัก',
   `transaction_id` VARCHAR(10) DEFAULT NULL,
-  `channel` VARCHAR(32) NOT NULL DEFAULT 'truemoney',
+  `channel` ENUM('truemoney','razer_gold_pin') NOT NULL DEFAULT 'truemoney',
   `real_amount` DECIMAL(10,2) DEFAULT NULL,
   `status` ENUM('pending','awaiting_result','success','failed') NOT NULL DEFAULT 'pending',
   `tmpay_status` TINYINT UNSIGNED DEFAULT NULL COMMENT '1,3,4,5 จาก TMPAY',

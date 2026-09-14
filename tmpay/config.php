@@ -9,7 +9,11 @@ return [
     'tmpay' => [
         'merchant_id' => 'TEST',
         'backend_url' => 'https://www.tmpay.net/TPG/backend.php',
-        'channel' => 'truemoney',
+        'channels' => [
+            'truemoney' => 'ทรูมันนี่',
+            'razer_gold_pin' => 'Razer Gold PIN',
+        ],
+        'default_channel' => 'truemoney',
         // ต้องเป็น URL ที่ TMPAY เรียกได้ (ทดสอบจริงต้องเป็น public URL)
         'resp_url' => 'http://localhost/tmpay/callback.php',
         'timeout' => 15,

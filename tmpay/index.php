@@ -43,13 +43,13 @@ function flash(): ?array
     return $msg;
 }
 
-function send_tmpay(array $tmpay, string $password): string
+function send_tmpay(array $tmpay, string $password, string $channel): string
 {
     $url = $tmpay['backend_url'] . '?' . http_build_query([
         'merchant_id' => $tmpay['merchant_id'],
         'password' => $password,
         'resp_url' => $tmpay['resp_url'],
-        'channel' => $tmpay['channel'],
+        'channel' => $channel,
     ]);
 
     if (function_exists('curl_init')) {
@@ -83,12 +83,15 @@ function send_tmpay(array $tmpay, string $password): string
 $pdo = db($config);
 $user = current_user($pdo);
 $error = null;
-$success = null;
+$channels = $config['tmpay']['channels'];
+$channel = (string) ($_POST['channel'] ?? $config['tmpay']['default_channel']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $password = preg_replace('/\D+/', '', (string) ($_POST['password'] ?? ''));
 
-    if (strlen($password) !== 14) {
+    if (!isset($channels[$channel])) {
+        $error = 'กรุณาเลือกช่องทางชำระเงิน TrueMoney หรือ Razer Gold PIN';
+    } elseif (strlen($password) !== 14) {
         $error = 'รหัสบัตรต้องเป็นตัวเลข 14 หลัก';
     } else {
         try {
@@ -106,9 +109,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'INSERT INTO tmpay_transactions (user_id, password, channel, status)
                      VALUES (?, ?, ?, ?)'
                 );
-                $insert->execute([$user['id'], $password, $config['tmpay']['channel'], 'pending']);
+                $insert->execute([$user['id'], $password, $channel, 'pending']);
 
-                $response = send_tmpay($config['tmpay'], $password);
+                $response = send_tmpay($config['tmpay'], $password, $channel);
                 $parts = explode('|', $response, 2);
                 $code = strtoupper(trim($parts[0] ?? ''));
                 $detail = trim($parts[1] ?? '');
@@ -141,7 +144,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 $flash = flash();
 $history = $pdo->prepare(
-    'SELECT password, transaction_id, real_amount, status, tmpay_status, message, created_at
+    'SELECT password, channel, transaction_id, real_amount, status, tmpay_status, message, created_at
      FROM tmpay_transactions
      WHERE user_id = ?
      ORDER BY id DESC
@@ -162,7 +165,7 @@ $statusLabel = [
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>เติมเงิน TrueMoney — TMPAY</title>
+    <title>เติมเงิน TMPAY</title>
     <style>
         :root {
             --bg: #0f1419;
@@ -194,6 +197,23 @@ $statusLabel = [
         p { color: var(--muted); }
         .row { display: flex; justify-content: space-between; gap: 12px; }
         label { display: block; margin-bottom: 8px; color: var(--muted); }
+        .channels { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+        .channels input { position: absolute; opacity: 0; pointer-events: none; }
+        .channels span {
+            display: block;
+            padding: 14px 12px;
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            background: #0f1824;
+            text-align: center;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .channels input:checked + span {
+            border-color: var(--accent);
+            box-shadow: 0 0 0 1px var(--accent) inset;
+            color: var(--accent);
+        }
         input[type="text"] {
             width: 100%;
             padding: 14px 16px;
@@ -233,7 +253,7 @@ $statusLabel = [
     <div class="card">
         <div class="row">
             <div>
-                <h1>เติมเงินบัตรทรูมันนี่</h1>
+                <h1>เติมเงิน TMPAY</h1>
                 <p>ผู้ใช้ <strong><?= htmlspecialchars($user['username'], ENT_QUOTES, 'UTF-8') ?></strong></p>
             </div>
             <div>
@@ -252,8 +272,17 @@ $statusLabel = [
         <?php endif; ?>
 
         <form method="post" action="index.php" autocomplete="off">
-            <label for="password">รหัสบัตรเงินสด 14 หลัก</label>
-            <input id="password" name="password" type="text" maxlength="14" pattern="\d{14}" required placeholder="55555555555551">
+            <label>ช่องทางชำระเงิน</label>
+            <div class="channels">
+                <?php foreach ($channels as $value => $label): ?>
+                    <label>
+                        <input type="radio" name="channel" value="<?= htmlspecialchars($value, ENT_QUOTES, 'UTF-8') ?>" <?= $channel === $value ? 'checked' : '' ?> required>
+                        <span><?= htmlspecialchars($label, ENT_QUOTES, 'UTF-8') ?></span>
+                    </label>
+                <?php endforeach; ?>
+            </div>
+            <label for="password">รหัสบัตร 14 หลัก</label>
+            <input id="password" name="password" type="text" maxlength="14" pattern="\d{14}" required placeholder="55555555555551" value="<?= htmlspecialchars((string) ($_POST['password'] ?? ''), ENT_QUOTES, 'UTF-8') ?>">
             <button type="submit">ส่งรายการไป TMPAY</button>
         </form>
         <p>ทดสอบด้วย <code>merchant_id=TEST</code> เช่น <code>55555555555551</code> = 50 บาท</p>
@@ -269,6 +298,7 @@ $statusLabel = [
                 <thead>
                 <tr>
                     <th>เวลา</th>
+                    <th>ช่องทาง</th>
                     <th>รหัสบัตร</th>
                     <th>Txn</th>
                     <th>จำนวน</th>
@@ -279,6 +309,7 @@ $statusLabel = [
                 <?php foreach ($txns as $txn): ?>
                     <tr>
                         <td><?= htmlspecialchars($txn['created_at'], ENT_QUOTES, 'UTF-8') ?></td>
+                        <td><?= htmlspecialchars($channels[$txn['channel']] ?? $txn['channel'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars($txn['password'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= htmlspecialchars((string) $txn['transaction_id'], ENT_QUOTES, 'UTF-8') ?></td>
                         <td><?= $txn['real_amount'] !== null ? number_format((float) $txn['real_amount'], 2) : '-' ?></td>
