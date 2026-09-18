@@ -1,6 +1,5 @@
 # TMPAY API Document
 
-- **Last updated:** 03/11/2021
 - **หัวข้อ:** การเชื่อมต่อกับระบบ TMPAY โดยใช้ PHP
 
 ## สารบัญ
